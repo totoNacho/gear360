@@ -1,8 +1,33 @@
+import java.io.File
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// --- Credenciales de firma de release ---------------------------------------
+// Se buscan en dos lugares, por orden:
+//   1. Variables de entorno (las inyecta GitHub Actions desde los secrets):
+//        KEYSTORE_FILE, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+//   2. Un archivo local keystore.properties (para compilar release en tu PC).
+// Si no hay credenciales, el release se compila SIN firmar (no rompe el build).
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile))
+}
+
+fun signingValue(envName: String, propName: String): String? =
+    System.getenv(envName) ?: keystoreProps.getProperty(propName)
+
+val ksFile = signingValue("KEYSTORE_FILE", "storeFile")
+val ksPassword = signingValue("KEYSTORE_PASSWORD", "storePassword")
+val ksAlias = signingValue("KEY_ALIAS", "keyAlias")
+val ksKeyPassword = signingValue("KEY_PASSWORD", "keyPassword")
+val hasSigningConfig = ksFile != null && ksPassword != null &&
+    ksAlias != null && ksKeyPassword != null
 
 android {
     namespace = "com.gear360.downloader"
@@ -16,6 +41,23 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        if (hasSigningConfig) {
+            create("release") {
+                // Resolvemos la ruta del keystore de forma robusta:
+                // si es absoluta la usamos tal cual; si es relativa, la
+                // anclamos a la raiz del proyecto (donde vive el .jks),
+                // no al modulo app/.
+                val ksPath = File(ksFile!!)
+                storeFile = if (ksPath.isAbsolute) ksPath
+                            else File(rootProject.projectDir, ksFile)
+                storePassword = ksPassword
+                keyAlias = ksAlias
+                keyPassword = ksKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -23,6 +65,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Firma el release solo si hay credenciales disponibles.
+            if (hasSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

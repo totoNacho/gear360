@@ -9,3 +9,9 @@
 .cxx
 local.properties
 /app/build
+
+# Keystores de firma: NUNCA subir al repositorio (son certificados privados)
+*.jks
+*.keystore
+keystore.properties
+keystore_base64.txt

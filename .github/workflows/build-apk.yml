@@ -1,13 +1,22 @@
 name: Build APK
 
-# Compila el APK de debug en los servidores de GitHub (con Android SDK ya
-# instalado). No necesitas Android Studio ni SDK en tu PC.
+# Compila el APK en los servidores de GitHub (con Android SDK ya instalado).
+# No necesitas Android Studio ni SDK en tu PC.
 #
-# Se dispara:
-#   - en cada push a main que toque el proyecto Gear360App
-#   - manualmente desde la pestaña "Actions" (workflow_dispatch)
+# Produce DOS APKs como artifacts:
+#   - app-debug.apk    : firmado en debug (siempre)
+#   - app-release.apk  : firmado con TU keystore, SOLO si configuraste los
+#                        secrets (ver abajo). Es el que evita el aviso de
+#                        "app no reconocida" de forma mas limpia.
 #
-# El APK queda disponible como "artifact" descargable al final del build.
+# Secrets necesarios para el release firmado (Settings > Secrets and
+# variables > Actions > New repository secret):
+#   KEYSTORE_BASE64     -> el archivo .jks codificado en base64
+#   KEYSTORE_PASSWORD   -> contrasena del keystore
+#   KEY_ALIAS           -> alias de la clave (gear360)
+#   KEY_PASSWORD        -> contrasena de la clave
+#
+# Si NO configuras los secrets, el build igual genera el APK de debug.
 
 on:
   push:
@@ -40,8 +49,6 @@ jobs:
 
       # El runner ubuntu-latest ya trae el Android SDK preinstalado y expone
       # ANDROID_HOME / ANDROID_SDK_ROOT, asi que no hace falta instalarlo.
-      # (La accion setup-android fallaba intentando instalar el paquete
-      # obsoleto 'tools', que Google ya elimino del repositorio del SDK.)
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -49,12 +56,44 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
+      # Reconstruye el keystore desde el secret base64 (si existe).
+      - name: Decode keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/Gear360App/gear360-release.jks"
+            echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+            echo "Keystore reconstruido."
+          else
+            echo "has_keystore=false" >> "$GITHUB_OUTPUT"
+            echo "Sin secret de keystore: se compilara solo debug."
+          fi
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Build signed release APK
+        if: steps.keystore.outputs.has_keystore == 'true'
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/Gear360App/gear360-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: gear360-debug-apk
           path: Gear360App/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK
+        if: steps.keystore.outputs.has_keystore == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gear360-release-apk
+          path: Gear360App/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
