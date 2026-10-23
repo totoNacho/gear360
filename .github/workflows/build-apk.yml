@@ -38,8 +38,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # El runner ubuntu-latest ya trae el Android SDK preinstalado y expone
+      # ANDROID_HOME / ANDROID_SDK_ROOT, asi que no hace falta instalarlo.
+      # (La accion setup-android fallaba intentando instalar el paquete
+      # obsoleto 'tools', que Google ya elimino del repositorio del SDK.)
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
