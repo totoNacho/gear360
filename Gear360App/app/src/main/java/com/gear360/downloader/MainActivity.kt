@@ -1,0 +1,206 @@
+package com.gear360.downloader
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            Gear360Theme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    val vm: MainViewModel = viewModel()
+                    AppScreen(vm)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppScreen(vm: MainViewModel) {
+    val ui by vm.ui.collectAsState()
+
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Gear 360 - Descargar") }) }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+        ) {
+            // --- Barra de acciones ---
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = { vm.connect() },
+                    enabled = !ui.connecting
+                ) {
+                    Text(if (ui.connected) "Reconectar" else "Conectar camara")
+                }
+
+                if (ui.connected) {
+                    Button(
+                        onClick = { vm.downloadAll() },
+                        enabled = ui.items.isNotEmpty() && !ui.downloadingAll
+                    ) {
+                        Text("Descargar todo")
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            if (ui.connecting || ui.loadingList) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (ui.connecting) "Conectando..." else "Cargando lista...")
+                }
+            }
+
+            ui.cameraInfo?.let { info ->
+                Text(
+                    text = "${info.model}  ·  fw ${info.firmware}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            ui.message?.let { msg ->
+                Text(text = msg, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // --- Lista de archivos ---
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(ui.items, key = { it.entry.uri }) { item ->
+                    MediaRow(
+                        item = item,
+                        onDownload = { vm.download(item) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MediaRow(item: MediaItem, onDownload: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = if (item.entry.isVideo) Icons.Filled.Movie else Icons.Filled.Photo,
+            contentDescription = null
+        )
+        Spacer(Modifier.width(10.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.entry.fileName,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                text = humanSize(item.entry.size),
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (item.state == DownloadState.DOWNLOADING) {
+                LinearProgressIndicator(
+                    progress = { item.progress / 100f },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                )
+            }
+            if (item.state == DownloadState.ERROR && item.error != null) {
+                Text(
+                    text = item.error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        Spacer(Modifier.width(8.dp))
+
+        when (item.state) {
+            DownloadState.DONE -> Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = "Descargado",
+                tint = MaterialTheme.colorScheme.primary
+            )
+            DownloadState.ERROR -> IconButton(onClick = onDownload) {
+                Icon(Icons.Filled.Error, contentDescription = "Reintentar", tint = MaterialTheme.colorScheme.error)
+            }
+            DownloadState.DOWNLOADING -> CircularProgressIndicator(
+                modifier = Modifier.width(24.dp).height(24.dp)
+            )
+            DownloadState.PENDING -> IconButton(onClick = onDownload) {
+                Icon(Icons.Filled.Download, contentDescription = "Descargar")
+            }
+        }
+    }
+}
+
+private fun humanSize(bytes: Long): String {
+    if (bytes <= 0) return "—"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var size = bytes.toDouble()
+    var i = 0
+    while (size >= 1024 && i < units.size - 1) {
+        size /= 1024
+        i++
+    }
+    return String.format("%.1f %s", size, units[i])
+}

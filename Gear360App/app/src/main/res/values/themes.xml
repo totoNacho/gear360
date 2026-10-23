@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Tema base de la app. Usamos un tema Material3 sin ActionBar porque la
+        UI se dibuja con Jetpack Compose (incluida su propia TopAppBar).
+    -->
+    <style name="Theme.Gear360App" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
