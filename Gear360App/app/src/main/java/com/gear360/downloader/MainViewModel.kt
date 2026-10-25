@@ -21,6 +21,9 @@ data class MediaItem(
     val error: String? = null,
 )
 
+/** Modo de captura actual de la camara. */
+enum class CaptureMode { PHOTO, VIDEO }
+
 data class UiState(
     val connecting: Boolean = false,
     val connected: Boolean = false,
@@ -29,6 +32,12 @@ data class UiState(
     val items: List<MediaItem> = emptyList(),
     val message: String? = null,    // mensaje de estado/error a mostrar
     val downloadingAll: Boolean = false,
+
+    // --- Vista en vivo y captura ---
+    val liveActive: Boolean = false,        // el stream de preview esta corriendo
+    val captureMode: CaptureMode = CaptureMode.PHOTO,
+    val recording: Boolean = false,         // hay una grabacion de video en curso
+    val busyCapture: Boolean = false,       // ejecutando un comando de captura
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -164,5 +173,123 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val base = e.message ?: e.javaClass.simpleName
         return "No se pudo conectar con la camara. " +
             "Verifica que el telefono este conectado a la WiFi de la Gear 360. ($base)"
+    }
+
+    // =========================================================================
+    //  VISTA EN VIVO Y CAPTURA
+    // =========================================================================
+
+    // Frames del preview (JPEG decodificado a Bitmap). Flow aparte porque
+    // cambia muchas veces por segundo y no conviene mezclarlo con el UiState.
+    private val _liveFrame = MutableStateFlow<android.graphics.Bitmap?>(null)
+    val liveFrame: StateFlow<android.graphics.Bitmap?> = _liveFrame.asStateFlow()
+
+    private var liveJob: kotlinx.coroutines.Job? = null
+    @Volatile private var stopLive = false
+
+    /** Sesion propia para captura/preview (se abre al entrar al modo camara). */
+    private var captureSessionOpen = false
+
+    private suspend fun ensureCaptureSession() = withContext(Dispatchers.IO) {
+        if (!captureSessionOpen) {
+            client.startSession()
+            captureSessionOpen = true
+        }
+    }
+
+    /** Inicia la vista en vivo (stream MJPEG de la camara). */
+    fun startLivePreview() {
+        if (_ui.value.liveActive) return
+        stopLive = false
+        _ui.update { it.copy(liveActive = true, message = "Vista en vivo activa") }
+
+        liveJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ensureCaptureSession()
+                // Aplicamos el modo actual antes de abrir el stream.
+                client.setCaptureMode(_ui.value.captureMode == CaptureMode.VIDEO)
+                client.streamLivePreview(
+                    onFrame = { jpeg ->
+                        val bmp = android.graphics.BitmapFactory
+                            .decodeByteArray(jpeg, 0, jpeg.size)
+                        if (bmp != null) _liveFrame.value = bmp
+                    },
+                    shouldStop = { stopLive },
+                )
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(message = "Vista en vivo no disponible: ${e.message ?: "error"}")
+                }
+            } finally {
+                _ui.update { it.copy(liveActive = false) }
+            }
+        }
+    }
+
+    /** Detiene la vista en vivo. */
+    fun stopLivePreview() {
+        stopLive = true
+        liveJob?.cancel()
+        liveJob = null
+        _liveFrame.value = null
+        _ui.update { it.copy(liveActive = false) }
+    }
+
+    /** Cambia entre modo foto y modo video. */
+    fun setMode(mode: CaptureMode) {
+        if (_ui.value.recording) return // no cambiar mientras graba
+        _ui.update { it.copy(captureMode = mode) }
+        viewModelScope.launch {
+            try {
+                ensureCaptureSession()
+                withContext(Dispatchers.IO) {
+                    client.setCaptureMode(mode == CaptureMode.VIDEO)
+                }
+            } catch (e: Exception) {
+                _ui.update { it.copy(message = "No se pudo cambiar de modo: ${e.message}") }
+            }
+        }
+    }
+
+    /**
+     * Accion del boton de captura:
+     *  - en modo foto: dispara una foto.
+     *  - en modo video: inicia o detiene la grabacion.
+     */
+    fun onCaptureButton() {
+        if (_ui.value.busyCapture) return
+        _ui.update { it.copy(busyCapture = true) }
+        viewModelScope.launch {
+            try {
+                ensureCaptureSession()
+                if (_ui.value.captureMode == CaptureMode.PHOTO) {
+                    withContext(Dispatchers.IO) { client.takePicture() }
+                    _ui.update { it.copy(message = "Foto capturada") }
+                } else {
+                    if (_ui.value.recording) {
+                        withContext(Dispatchers.IO) { client.stopCapture() }
+                        _ui.update { it.copy(recording = false, message = "Grabacion detenida") }
+                    } else {
+                        withContext(Dispatchers.IO) { client.startCapture() }
+                        _ui.update { it.copy(recording = true, message = "Grabando video...") }
+                    }
+                }
+            } catch (e: Exception) {
+                _ui.update { it.copy(message = "Error en la captura: ${e.message ?: "error"}") }
+            } finally {
+                _ui.update { it.copy(busyCapture = false) }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopLivePreview()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (captureSessionOpen) client.closeSession()
+            } catch (_: Exception) {
+            }
+        }
     }
 }

@@ -91,6 +91,129 @@ class Gear360Client(
         }
     }
 
+    // --- Captura y modo -------------------------------------------------------
+
+    /**
+     * Cambia el modo de captura de la camara.
+     * @param video true para modo video, false para modo foto.
+     * La Gear 360 usa los valores "image" y "_video" en la opcion captureMode.
+     */
+    fun setCaptureMode(video: Boolean) {
+        val sid = sessionId ?: return
+        val options = JSONObject().put("captureMode", if (video) "_video" else "image")
+        execute(
+            "camera.setOptions",
+            JSONObject().put("sessionId", sid).put("options", options)
+        )
+    }
+
+    /** Dispara una foto (modo foto). Devuelve true si la camara acepto el comando. */
+    fun takePicture(): Boolean {
+        val sid = sessionId ?: return false
+        val res = execute("camera.takePicture", JSONObject().put("sessionId", sid))
+        // La camara responde con state "inProgress" o "done"; ambos son exito.
+        val state = res.optString("state", "")
+        return state == "inProgress" || state == "done" || res.has("results")
+    }
+
+    /** Inicia la grabacion de video (modo video). */
+    fun startCapture(): Boolean {
+        val sid = sessionId ?: return false
+        val res = execute("camera.startCapture", JSONObject().put("sessionId", sid))
+        return res.optString("state", "").let { it == "inProgress" || it == "done" } ||
+            res.has("results")
+    }
+
+    /** Detiene la grabacion de video en curso. */
+    fun stopCapture(): Boolean {
+        val sid = sessionId ?: return false
+        val res = execute("camera.stopCapture", JSONObject().put("sessionId", sid))
+        return res.has("results") || res.optString("state", "") == "done"
+    }
+
+    /**
+     * Abre el stream de vista en vivo (camera.getLivePreview).
+     * La camara responde con un stream MJPEG: multipart/x-mixed-replace, es
+     * decir una secuencia continua de imagenes JPEG. Esta funcion entrega
+     * cada frame JPEG (como ByteArray) a [onFrame] hasta que [shouldStop]
+     * devuelva true o se corte la conexion.
+     *
+     * Pensada para ejecutarse en un hilo de IO.
+     */
+    fun streamLivePreview(
+        onFrame: (ByteArray) -> Unit,
+        shouldStop: () -> Boolean,
+    ) {
+        val body = JSONObject()
+            .put("name", "camera.getLivePreview")
+            .put("parameters", JSONObject().apply {
+                sessionId?.let { put("sessionId", it) }
+            })
+            .toString()
+            .toRequestBody(jsonType)
+
+        // El stream es largo: usamos un cliente con readTimeout amplio.
+        val streamClient = http.newBuilder()
+            .readTimeout(0, TimeUnit.SECONDS) // sin timeout de lectura
+            .build()
+
+        val req = Request.Builder()
+            .url("$baseUrl/osc/commands/execute")
+            .post(body)
+            .build()
+
+        streamClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw RuntimeException("No se pudo iniciar la vista en vivo (HTTP ${resp.code})")
+            }
+            val source = resp.body?.byteStream()
+                ?: throw RuntimeException("Vista en vivo sin cuerpo")
+            parseMjpeg(source, onFrame, shouldStop)
+        }
+    }
+
+    /**
+     * Parsea un stream MJPEG extrayendo cada imagen JPEG. Busca los marcadores
+     * de inicio (FF D8) y fin (FF D9) de cada JPEG en el flujo de bytes.
+     */
+    private fun parseMjpeg(
+        input: java.io.InputStream,
+        onFrame: (ByteArray) -> Unit,
+        shouldStop: () -> Boolean,
+    ) {
+        val buffer = java.io.ByteArrayOutputStream()
+        var prev = -1
+        var inImage = false
+        val reader = java.io.BufferedInputStream(input)
+
+        while (!shouldStop()) {
+            val b = reader.read()
+            if (b == -1) break
+
+            if (!inImage) {
+                // Buscamos el marcador de inicio de JPEG: 0xFF 0xD8
+                if (prev == 0xFF && b == 0xD8) {
+                    inImage = true
+                    buffer.reset()
+                    buffer.write(0xFF)
+                    buffer.write(0xD8)
+                }
+                prev = b
+            } else {
+                buffer.write(b)
+                // Marcador de fin de JPEG: 0xFF 0xD9
+                if (prev == 0xFF && b == 0xD9) {
+                    onFrame(buffer.toByteArray())
+                    inImage = false
+                    buffer.reset()
+                    prev = -1
+                } else {
+                    prev = b
+                }
+            }
+        }
+    }
+
     /**
      * Lista todas las fotos y videos de la camara, manejando paginacion
      * (continuationToken) para traer el contenido completo.
