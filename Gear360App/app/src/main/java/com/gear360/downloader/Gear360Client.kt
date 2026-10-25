@@ -321,22 +321,28 @@ class Gear360Client(
         val sampleUri = photos.firstOrNull { it.uri.contains("/") }?.uri ?: return emptyList()
         val folder = sampleUri.substringBeforeLast('/')   // /mnt/mmc/DCIM/100PHOTO
 
-        // Numeros y prefijos presentes en las fotos.
-        val numbers = photos.mapNotNull { extractNumber(it.fileName) }
-        if (numbers.isEmpty()) return emptyList()
-        val min = numbers.min()
-        val max = numbers.max()
+        // Numeros ya ocupados por FOTOS (esos no son videos, no hay que probarlos).
+        val photoNumbers = photos.mapNotNull { extractNumber(it.fileName) }.toSet()
+        if (photoNumbers.isEmpty()) return emptyList()
+        val min = photoNumbers.min()
+        val max = photoNumbers.max()
 
-        // Margen por si hay videos antes/despues del rango de fotos.
-        val from = (min - 5).coerceAtLeast(0)
-        val to = max + 5
+        // OPTIMIZACION CLAVE: los videos ocupan los "huecos" de numeracion que
+        // dejan las fotos. En vez de probar TODO el rango, solo probamos los
+        // numeros que NO tienen foto (mas un pequeno margen por los extremos).
+        val from = (min - 3).coerceAtLeast(0)
+        val to = max + 3
+        val candidates = (from..to).filter { it !in photoNumbers }
+
+        // En la Gear 360 los videos usan prefijo "360_". Probamos ese primero
+        // y "SAM_" solo como respaldo.
         val prefixes = listOf("360_", "SAM_")
 
         val videos = ArrayList<MediaEntry>()
-        val totalChecks = (to - from + 1)
+        val total = candidates.size
         var done = 0
 
-        for (n in from..to) {
+        for (n in candidates) {
             if (shouldStop()) break
             val nnnn = n.toString().padStart(4, '0')
             for (prefix in prefixes) {
@@ -353,11 +359,11 @@ class Gear360Client(
                             mimeType = "video/mp4",
                         )
                     )
-                    break // encontrado con este numero, no probar el otro prefijo
+                    break
                 }
             }
             done++
-            onProgress(done, totalChecks)
+            onProgress(done, total)
         }
         return videos
     }
@@ -368,10 +374,23 @@ class Gear360Client(
         return m.groupValues[1].toIntOrNull()
     }
 
+    // Cliente dedicado para comprobar existencia: timeouts CORTOS para que un
+    // archivo inexistente falle rapido y no bloquee el escaneo de videos.
+    private val probeClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS)
+            .build()
+    }
+
     /**
-     * Devuelve el tamano en bytes de un archivo si existe en la camara, o 0 si
-     * no existe. Usa getImage pero cierra la conexion tras leer el
-     * Content-Length, sin descargar el contenido (rapido).
+     * Devuelve el tamano en bytes de un archivo si existe, o 0 si no existe.
+     *
+     * CLAVE DE RENDIMIENTO: leemos SOLO la cabecera Content-Length y cerramos
+     * la respuesta de inmediato SIN consumir el cuerpo. Antes el cuerpo (un
+     * video de cientos de MB) empezaba a transferirse y saturaba la camara,
+     * haciendo el escaneo lentisimo. Ademas usamos timeouts cortos.
      */
     private fun headSize(fileUri: String): Long {
         val body = JSONObject()
@@ -384,12 +403,15 @@ class Gear360Client(
             .post(body)
             .build()
         return try {
-            http.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return 0L
-                val len = resp.body?.contentLength() ?: -1L
-                // Si viene Content-Length valido lo usamos; si no, consideramos
-                // que existe pero de tamano desconocido.
-                if (len > 0) len else 1L
+            val resp = probeClient.newCall(req).execute()
+            val len = resp.header("Content-Length")?.toLongOrNull() ?: -1L
+            val ok = resp.isSuccessful
+            // Cerramos SIN leer el cuerpo: corta la transferencia del video.
+            resp.close()
+            when {
+                !ok -> 0L
+                len > 0 -> len
+                else -> 1L
             }
         } catch (_: Exception) {
             0L
