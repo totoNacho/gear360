@@ -33,6 +33,20 @@ class Gear360Client(
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    // Cliente para DESCARGAS de archivos grandes (videos de cientos de MB).
+    // Sin timeout de lectura ni de llamada: una descarga larga por WiFi NO debe
+    // abortarse ("software caused connection abort"). Solo limitamos el tiempo
+    // entre bytes implicitamente por el propio stream.
+    private val downloadClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)   // sin limite de lectura
+            .writeTimeout(0, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)   // sin limite total
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private var sessionId: String? = null
 
@@ -297,6 +311,78 @@ class Gear360Client(
         return listViaListImages(pageSize, includeThumb)
     }
 
+    data class ScanResult(val photos: List<MediaEntry>, val videos: List<MediaEntry>)
+
+    /**
+     * Escanea TODOS los archivos de la camara por numeracion directa.
+     *
+     * Motivo: en esta Gear 360, camera.listImages solo reporta un subconjunto
+     * (p.ej. 12 fotos) aunque la tarjeta tenga muchas mas. Pero TODAS son
+     * accesibles por su ruta directa /mnt/mmc/DCIM/100PHOTO/PREFIJO_NNNN.ext.
+     *
+     * Usamos listImages solo para descubrir la carpeta y un numero de
+     * referencia; luego recorremos un rango amplio probando .JPG y .MP4.
+     *
+     * @param onProgress reporta (actual, total) del escaneo.
+     * @param shouldStop permite cancelar.
+     */
+    fun scanAllMedia(
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+        shouldStop: () -> Boolean = { false },
+    ): ScanResult {
+        // 1) Usamos listImages para descubrir carpeta y numeros de referencia.
+        val listed = try { listViaListImages(200, false) } catch (_: Exception) { emptyList() }
+        val folder = listed.firstOrNull { it.uri.contains("/") }
+            ?.uri?.substringBeforeLast('/')
+            ?: "/mnt/mmc/DCIM/100PHOTO"
+
+        val listedNumbers = listed.mapNotNull { extractNumber(it.fileName) }
+        // Rango a escanear. Si listImages dio pistas, lo centramos ahi con
+        // margen amplio; si no, usamos un rango general por defecto.
+        val center = if (listedNumbers.isNotEmpty()) listedNumbers else listOf(1)
+        val from = (center.min() - 300).coerceAtLeast(1)
+        val to = center.max() + 50
+
+        val photos = ArrayList<MediaEntry>()
+        val videos = ArrayList<MediaEntry>()
+        val prefixes = listOf("360_", "SAM_")
+        val total = (to - from + 1)
+        var done = 0
+
+        for (n in from..to) {
+            if (shouldStop()) break
+            val nnnn = n.toString().padStart(4, '0')
+            var found = false
+            for (prefix in prefixes) {
+                if (shouldStop()) break
+                // Probamos foto primero (lo mas comun), luego video.
+                for (ext in listOf("JPG", "MP4")) {
+                    val fileName = "$prefix$nnnn.$ext"
+                    val uri = "$folder/$fileName"
+                    val size = headSize(uri)
+                    if (size > 0) {
+                        val entry = MediaEntry(
+                            name = fileName,
+                            uri = uri,
+                            size = size,
+                            mimeType = if (ext == "MP4") "video/mp4" else "image/jpeg",
+                        )
+                        if (ext == "MP4") videos.add(entry) else photos.add(entry)
+                        found = true
+                        break
+                    }
+                }
+                if (found) break
+            }
+            done++
+            onProgress(done, total)
+        }
+        // Mas recientes primero (numero descendente).
+        photos.sortByDescending { extractNumber(it.fileName) ?: 0 }
+        videos.sortByDescending { extractNumber(it.fileName) ?: 0 }
+        return ScanResult(photos, videos)
+    }
+
     /**
      * Busca VIDEOS (.MP4) en la camara por numeracion. La Gear 360 no los
      * lista con listImages, pero SI se pueden pedir por su ruta directa.
@@ -524,7 +610,9 @@ class Gear360Client(
             .post(body)
             .build()
 
-        http.newCall(req).execute().use { resp ->
+        // Usamos el cliente de descargas (sin timeout de lectura) para que los
+        // videos grandes no se corten a mitad de camino.
+        downloadClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
                 throw RuntimeException("Error al descargar (HTTP ${resp.code})")
             }
@@ -532,7 +620,7 @@ class Gear360Client(
             val total = respBody.contentLength()
             var written = 0L
             val stream = respBody.byteStream()
-            val buffer = ByteArray(8192)
+            val buffer = ByteArray(16384)   // bloques mas grandes: menos overhead
             while (true) {
                 val read = stream.read(buffer)
                 if (read == -1) break

@@ -154,93 +154,65 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Lista las FOTOS de la camara. Los videos se buscan aparte (scanVideos). */
-    fun loadList() {
-        _ui.update { it.copy(loadingList = true, message = null) }
-        viewModelScope.launch {
-            try {
-                val entries = withContext(Dispatchers.IO) {
-                    client.startSession()
-                    try {
-                        client.listImages()
-                    } finally {
-                        client.closeSession()
-                    }
-                }
-                // Separamos por si acaso viniera algun video en el listado.
-                val photoItems = entries.filter { !it.isVideo }.map { MediaItem(it) }
-                _ui.update {
-                    it.copy(
-                        loadingList = false,
-                        photos = photoItems,
-                        items = photoItems,     // compatibilidad
-                        message = if (photoItems.isEmpty())
-                            "No se encontraron fotos."
-                        else
-                            "${photoItems.size} fotos. Pulsa 'Buscar videos' para los videos.",
-                    )
-                }
-            } catch (e: Exception) {
-                _ui.update {
-                    it.copy(loadingList = false, message = conexionError(e))
-                }
-            }
-        }
-    }
-
-    @Volatile private var stopVideoScan = false
+    @Volatile private var stopScan = false
 
     /**
-     * Busca los videos de la camara por numeracion (la Gear 360 no los lista
-     * con listImages). Usa las fotos ya cargadas para deducir carpeta y rango.
+     * Escanea TODA la camara (fotos + videos) por numeracion directa, porque
+     * listImages de esta Gear 360 solo reporta un subconjunto. Un solo escaneo
+     * llena ambas pestanas.
      */
-    fun scanVideos() {
-        if (_ui.value.scanningVideos) return
-        val photos = _ui.value.photos.map { it.entry }
-        if (photos.isEmpty()) {
-            _ui.update { it.copy(message = "Primero carga las fotos (Conectar/Actualizar).") }
-            return
-        }
-        stopVideoScan = false
-        _ui.update { it.copy(scanningVideos = true, videoScanProgress = 0, message = "Buscando videos...") }
-
+    fun loadList() {
+        stopScan = false
+        _ui.update { it.copy(loadingList = true, scanningVideos = true, videoScanProgress = 0, message = "Escaneando camara...") }
         viewModelScope.launch {
             try {
-                val found = withContext(Dispatchers.IO) {
+                val result = withContext(Dispatchers.IO) {
                     client.startSession()
                     try {
-                        client.findVideos(
-                            photos = photos,
+                        client.scanAllMedia(
                             onProgress = { done, total ->
                                 val pct = if (total > 0) done * 100 / total else 0
                                 _ui.update { it.copy(videoScanProgress = pct) }
                             },
-                            shouldStop = { stopVideoScan },
+                            shouldStop = { stopScan },
                         )
                     } finally {
                         client.closeSession()
                     }
                 }
+                val photoItems = result.photos.map { MediaItem(it) }
+                val videoItems = result.videos.map { MediaItem(it) }
                 _ui.update {
                     it.copy(
+                        loadingList = false,
                         scanningVideos = false,
-                        videos = found.map { v -> MediaItem(v) },
-                        message = if (found.isEmpty())
-                            "No se encontraron videos."
-                        else
-                            "${found.size} videos encontrados.",
+                        photos = photoItems,
+                        videos = videoItems,
+                        items = photoItems,
+                        message = "${photoItems.size} fotos y ${videoItems.size} videos.",
                     )
                 }
             } catch (e: Exception) {
                 _ui.update {
-                    it.copy(scanningVideos = false, message = "Error al buscar videos: ${e.message}")
+                    it.copy(loadingList = false, scanningVideos = false, message = conexionError(e))
                 }
             }
         }
     }
 
+    fun stopScan() { stopScan = true }
+
+    /**
+     * Re-escanea toda la camara. El escaneo (loadList) ya trae fotos Y videos
+     * de una sola pasada, asi que esto solo vuelve a correrlo.
+     */
+    fun scanVideos() {
+        if (_ui.value.loadingList) return
+        loadList()
+    }
+
     fun stopVideoScan() {
-        stopVideoScan = true
+        stopScan = true
     }
 
     /** Muestra u oculta la respuesta cruda de la camara (diagnostico). */
