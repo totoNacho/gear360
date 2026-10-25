@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -155,6 +156,40 @@ fun AppScreen(vm: MainViewModel) {
                 ) {
                     Text("Mas tarde")
                 }
+            }
+        )
+    }
+
+    // Dialogo de vista previa bajo demanda.
+    if (ui.previewName != null) {
+        val previewBmp by vm.previewImage.collectAsState()
+        AlertDialog(
+            onDismissRequest = { vm.closePreview() },
+            title = { Text(ui.previewName ?: "Vista previa") },
+            text = {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(320.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val bmp = previewBmp
+                    when {
+                        bmp != null -> Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = ui.previewName,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        ui.previewLoading -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator()
+                            Spacer(Modifier.height(8.dp))
+                            Text("Cargando... ${ui.previewProgress}%")
+                        }
+                        else -> Text("Sin imagen")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.closePreview() }) { Text("Cerrar") }
             }
         )
     }
@@ -315,7 +350,11 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(ui.photos, key = { it.entry.uri }) { item ->
-                    MediaRow(item = item, onDownload = { vm.download(item) })
+                    MediaRow(
+                        item = item,
+                        onDownload = { vm.download(item) },
+                        onPreview = { vm.showPreview(item) }
+                    )
                 }
             }
         } else {
@@ -381,7 +420,7 @@ fun FilterChipLike(
 }
 
 @Composable
-fun MediaRow(item: MediaItem, onDownload: () -> Unit) {
+fun MediaRow(item: MediaItem, onDownload: () -> Unit, onPreview: () -> Unit = {}) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -444,7 +483,14 @@ fun MediaRow(item: MediaItem, onDownload: () -> Unit) {
             }
         }
 
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(4.dp))
+
+        // Boton "Ver": vista previa bajo demanda (solo fotos).
+        if (!item.entry.isVideo) {
+            IconButton(onClick = onPreview) {
+                Icon(Icons.Filled.Visibility, contentDescription = "Ver")
+            }
+        }
 
         when (item.state) {
             DownloadState.DONE -> Icon(

@@ -45,6 +45,11 @@ data class UiState(
     val scanningVideos: Boolean = false,
     val videoScanProgress: Int = 0,         // 0..100
 
+    // --- Vista previa bajo demanda ---
+    val previewLoading: Boolean = false,
+    val previewName: String? = null,        // nombre del archivo en vista previa
+    val previewProgress: Int = 0,           // 0..100 descarga de la preview
+
     // --- Diagnostico ---
     val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
 
@@ -343,6 +348,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var liveJob: kotlinx.coroutines.Job? = null
     @Volatile private var stopLive = false
+
+    // Imagen de la vista previa bajo demanda (foto completa mostrada en grande).
+    private val _previewImage = MutableStateFlow<android.graphics.Bitmap?>(null)
+    val previewImage: StateFlow<android.graphics.Bitmap?> = _previewImage.asStateFlow()
+
+    private var previewJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Carga la vista previa de un archivo bajo demanda: descarga la foto a
+     * memoria y la muestra en grande. Para videos muestra solo un aviso (no
+     * se puede previsualizar un video sin reproducirlo).
+     */
+    fun showPreview(item: MediaItem) {
+        if (item.entry.isVideo) {
+            _ui.update {
+                it.copy(message = "La vista previa de video no esta disponible; descargalo para verlo.")
+            }
+            return
+        }
+        previewJob?.cancel()
+        _previewImage.value = null
+        _ui.update { it.copy(previewLoading = true, previewName = item.entry.fileName, previewProgress = 0) }
+
+        previewJob = viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    val buffer = java.io.ByteArrayOutputStream()
+                    client.downloadFile(
+                        fileUri = item.entry.uri,
+                        onChunk = { buf, len -> buffer.write(buf, 0, len) },
+                        onProgress = { soFar, total ->
+                            if (total > 0) {
+                                val pct = (soFar * 100 / total).toInt()
+                                _ui.update { it.copy(previewProgress = pct) }
+                            }
+                        },
+                    )
+                    buffer.toByteArray()
+                }
+                val bmp = withContext(Dispatchers.Default) {
+                    // Decodificamos a tamano reducido para no gastar memoria:
+                    // la foto es 5472px, para pantalla basta ~1080px.
+                    val opts = android.graphics.BitmapFactory.Options().apply {
+                        inSampleSize = 4   // reduce ~1/4 (suficiente para ver encuadre)
+                    }
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                }
+                _previewImage.value = bmp
+                _ui.update { it.copy(previewLoading = false) }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(previewLoading = false, previewName = null,
+                        message = "No se pudo cargar la vista previa: ${e.message ?: "error"}")
+                }
+            }
+        }
+    }
+
+    /** Cierra la vista previa y libera la imagen. */
+    fun closePreview() {
+        previewJob?.cancel()
+        previewJob = null
+        _previewImage.value = null
+        _ui.update { it.copy(previewLoading = false, previewName = null, previewProgress = 0) }
+    }
 
     /** Sesion propia para captura/preview (se abre al entrar al modo camara). */
     private var captureSessionOpen = false
