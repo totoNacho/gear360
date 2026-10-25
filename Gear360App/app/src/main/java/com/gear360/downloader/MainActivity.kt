@@ -4,7 +4,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,8 +38,11 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -140,10 +146,36 @@ fun MediaRow(item: MediaItem, onDownload: () -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = if (item.entry.isVideo) Icons.Filled.Movie else Icons.Filled.Photo,
-            contentDescription = null
-        )
+        // Vista previa: miniatura si la hay; si no, un icono segun tipo.
+        val thumb = remember(item.entry.thumbnailBase64) {
+            decodeThumb(item.entry.thumbnailBase64)
+        }
+        Box(
+            modifier = Modifier.width(56.dp).height(56.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (thumb != null) {
+                Image(
+                    bitmap = thumb,
+                    contentDescription = item.entry.fileName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // Marca de "play" encima para los videos.
+                if (item.entry.isVideo) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayCircle,
+                        contentDescription = "video",
+                        tint = androidx.compose.ui.graphics.Color.White
+                    )
+                }
+            } else {
+                Icon(
+                    imageVector = if (item.entry.isVideo) Icons.Filled.Movie else Icons.Filled.Photo,
+                    contentDescription = null
+                )
+            }
+        }
         Spacer(Modifier.width(10.dp))
 
         Column(modifier = Modifier.weight(1f)) {
@@ -190,6 +222,22 @@ fun MediaRow(item: MediaItem, onDownload: () -> Unit) {
                 Icon(Icons.Filled.Download, contentDescription = "Descargar")
             }
         }
+    }
+}
+
+/**
+ * Decodifica la miniatura en base64 que envia la camara a un ImageBitmap
+ * listo para Compose. Devuelve null si no hay miniatura o falla el decode.
+ */
+private fun decodeThumb(base64: String?): androidx.compose.ui.graphics.ImageBitmap? {
+    if (base64.isNullOrEmpty()) return null
+    return try {
+        val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: return null
+        bmp.asImageBitmap()
+    } catch (_: Exception) {
+        null
     }
 }
 

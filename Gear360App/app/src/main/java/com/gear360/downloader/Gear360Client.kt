@@ -94,15 +94,22 @@ class Gear360Client(
     /**
      * Lista todas las fotos y videos de la camara, manejando paginacion
      * (continuationToken) para traer el contenido completo.
+     *
+     * @param includeThumb si true, pide a la camara la miniatura (base64) de
+     *        cada archivo para mostrar vista previa. Hace el listado mas lento
+     *        y pesado, por eso es opcional.
      */
-    fun listImages(pageSize: Int = 100): List<MediaEntry> {
+    fun listImages(pageSize: Int = 100, includeThumb: Boolean = true): List<MediaEntry> {
         val out = ArrayList<MediaEntry>()
         var token: String? = null
 
         while (true) {
             val params = JSONObject()
                 .put("entryCount", pageSize)
-                .put("includeThumb", false)
+                .put("includeThumb", includeThumb)
+                // _detail=true hace que la Gear 360 incluya metadatos extra
+                // (tipo de archivo, dimensiones) y ademas la miniatura.
+                .put("_detail", true)
             if (token != null) params.put("continuationToken", token)
 
             val res = execute("camera.listImages", params)
@@ -111,11 +118,19 @@ class Gear360Client(
 
             for (i in 0 until entries.length()) {
                 val e = entries.getJSONObject(i)
+                // Campos que ayudan a distinguir foto de video. Distintas
+                // firmwares usan nombres distintos, asi que miramos varios.
+                val mime = e.optString("_mimeType", e.optString("mimeType", ""))
+                val recordTime = e.optInt("_recordTime", e.optInt("recordTime", 0))
                 out.add(
                     MediaEntry(
                         name = e.optString("name", e.optString("uri")),
                         uri = e.optString("uri"),
                         size = e.optLong("size", 0L),
+                        mimeType = mime,
+                        // Un video tiene duracion de grabacion > 0.
+                        recordTimeSec = recordTime,
+                        thumbnailBase64 = e.optString("thumbnail", "").ifEmpty { null },
                     )
                 )
             }
@@ -182,9 +197,26 @@ data class MediaEntry(
     val name: String,
     val uri: String,
     val size: Long,
+    val mimeType: String = "",
+    val recordTimeSec: Int = 0,
+    /** Miniatura en base64 (si la camara la envio con includeThumb). */
+    val thumbnailBase64: String? = null,
 ) {
+    /**
+     * Detecta si es video mirando varias pistas, porque distintas firmwares
+     * de la Gear 360 rellenan campos distintos:
+     *  - extension del nombre/uri (.mp4/.mov)
+     *  - mimeType que empieza con "video"
+     *  - duracion de grabacion > 0 (solo los videos la tienen)
+     */
     val isVideo: Boolean
-        get() = name.lowercase().endsWith(".mp4") || name.lowercase().endsWith(".mov")
+        get() {
+            val n = (uri.ifEmpty { name }).lowercase()
+            return n.endsWith(".mp4") ||
+                n.endsWith(".mov") ||
+                mimeType.startsWith("video", ignoreCase = true) ||
+                recordTimeSec > 0
+        }
 
     /** Nombre de archivo limpio (ultima parte del uri/name). */
     val fileName: String
