@@ -273,7 +273,59 @@ class Gear360Client(
      *        cada archivo para mostrar vista previa. Hace el listado mas lento
      *        y pesado, por eso es opcional.
      */
+    /**
+     * Ultima respuesta cruda del listado, para diagnostico. La UI puede
+     * mostrarla si algo no aparece como se espera.
+     */
+    @Volatile
+    var lastListRawResponse: String = ""
+        private set
+
     fun listImages(pageSize: Int = 100, includeThumb: Boolean = true): List<MediaEntry> {
+        // Intento 1: camera.listFiles con fileType="all" (API v2). Es el
+        // comando correcto para traer FOTOS Y VIDEOS juntos, con miniaturas.
+        try {
+            val viaFiles = listViaListFiles(pageSize, includeThumb)
+            if (viaFiles.isNotEmpty()) return viaFiles
+        } catch (_: Exception) {
+            // Si la camara no soporta listFiles, caemos a listImages.
+        }
+        // Intento 2 (fallback): camera.listImages (API v1).
+        return listViaListImages(pageSize, includeThumb)
+    }
+
+    /** Listado con camera.listFiles (API v2): fotos + videos + miniaturas. */
+    private fun listViaListFiles(pageSize: Int, includeThumb: Boolean): List<MediaEntry> {
+        val out = ArrayList<MediaEntry>()
+        var start = 0
+
+        while (true) {
+            val params = JSONObject()
+                .put("fileType", "all")          // fotos Y videos
+                .put("startPosition", start)
+                .put("entryCount", pageSize)
+            if (includeThumb) params.put("maxThumbSize", 320) // activa miniaturas
+
+            val res = execute("camera.listFiles", params)
+            lastListRawResponse = truncateForDiag(res.toString())
+
+            val results = res.optJSONObject("results") ?: break
+            val entries: JSONArray = results.optJSONArray("entries") ?: JSONArray()
+            if (entries.length() == 0) break
+
+            for (i in 0 until entries.length()) {
+                out.add(parseEntry(entries.getJSONObject(i)))
+            }
+
+            val total = results.optInt("totalEntries", out.size)
+            start += entries.length()
+            if (start >= total) break
+        }
+        return out
+    }
+
+    /** Listado con camera.listImages (API v1), como respaldo. */
+    private fun listViaListImages(pageSize: Int, includeThumb: Boolean): List<MediaEntry> {
         val out = ArrayList<MediaEntry>()
         var token: String? = null
 
@@ -281,32 +333,17 @@ class Gear360Client(
             val params = JSONObject()
                 .put("entryCount", pageSize)
                 .put("includeThumb", includeThumb)
-                // _detail=true hace que la Gear 360 incluya metadatos extra
-                // (tipo de archivo, dimensiones) y ademas la miniatura.
-                .put("_detail", true)
+                .put("maxSize", 320)
             if (token != null) params.put("continuationToken", token)
 
             val res = execute("camera.listImages", params)
+            lastListRawResponse = truncateForDiag(res.toString())
+
             val results = res.optJSONObject("results") ?: break
             val entries: JSONArray = results.optJSONArray("entries") ?: JSONArray()
 
             for (i in 0 until entries.length()) {
-                val e = entries.getJSONObject(i)
-                // Campos que ayudan a distinguir foto de video. Distintas
-                // firmwares usan nombres distintos, asi que miramos varios.
-                val mime = e.optString("_mimeType", e.optString("mimeType", ""))
-                val recordTime = e.optInt("_recordTime", e.optInt("recordTime", 0))
-                out.add(
-                    MediaEntry(
-                        name = e.optString("name", e.optString("uri")),
-                        uri = e.optString("uri"),
-                        size = e.optLong("size", 0L),
-                        mimeType = mime,
-                        // Un video tiene duracion de grabacion > 0.
-                        recordTimeSec = recordTime,
-                        thumbnailBase64 = e.optString("thumbnail", "").ifEmpty { null },
-                    )
-                )
+                out.add(parseEntry(entries.getJSONObject(i)))
             }
 
             token = results.optString("continuationToken", "").ifEmpty { null }
@@ -314,6 +351,30 @@ class Gear360Client(
         }
         return out
     }
+
+    /**
+     * Convierte un entry JSON (de listFiles o listImages) a MediaEntry,
+     * tolerando los distintos nombres de campo que usan las firmwares.
+     */
+    private fun parseEntry(e: JSONObject): MediaEntry {
+        // La URL del archivo puede venir como fileUrl (listFiles) o uri (listImages).
+        val url = e.optString("fileUrl", e.optString("uri", ""))
+        val mime = e.optString("_mimeType", e.optString("mimeType", ""))
+        val recordTime = e.optInt("_recordTime", e.optInt("recordTime", 0))
+        // La miniatura puede venir en "thumbnail" (base64).
+        val thumb = e.optString("thumbnail", "").ifEmpty { null }
+        return MediaEntry(
+            name = e.optString("name", url),
+            uri = url,
+            size = e.optLong("size", 0L),
+            mimeType = mime,
+            recordTimeSec = recordTime,
+            thumbnailBase64 = thumb,
+        )
+    }
+
+    private fun truncateForDiag(s: String): String =
+        if (s.length > 1200) s.substring(0, 1200) + "...(recortado)" else s
 
     /**
      * Descarga el binario de un archivo (por su uri) y entrega los bytes por

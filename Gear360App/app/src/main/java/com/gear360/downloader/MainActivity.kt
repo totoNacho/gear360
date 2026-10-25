@@ -13,8 +13,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -37,6 +40,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -228,6 +232,26 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
                     Text("Descargar todo")
                 }
             }
+        }
+
+        if (ui.connected) {
+            TextButton(onClick = { vm.toggleDiagnostic() }) {
+                Text(if (ui.diagnostic == null) "Ver diagnostico" else "Ocultar diagnostico")
+            }
+        }
+
+        // Panel de diagnostico: respuesta cruda de la camara. Sirve para
+        // depurar que campos devuelve tu firmware exactamente.
+        ui.diagnostic?.let { diag ->
+            Text(
+                text = diag,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState())
+            )
+            Spacer(Modifier.height(8.dp))
         }
 
         Spacer(Modifier.height(8.dp))

@@ -38,6 +38,9 @@ data class UiState(
     val captureMode: CaptureMode = CaptureMode.PHOTO,
     val recording: Boolean = false,         // hay una grabacion de video en curso
     val busyCapture: Boolean = false,       // ejecutando un comando de captura
+
+    // --- Diagnostico ---
+    val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -88,6 +91,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         client.closeSession()
                     }
                 }
+                val photos = entries.count { !it.isVideo }
+                val videos = entries.count { it.isVideo }
                 _ui.update {
                     it.copy(
                         loadingList = false,
@@ -95,13 +100,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         message = if (entries.isEmpty())
                             "No se encontraron fotos ni videos."
                         else
-                            "${entries.size} archivos en la camara.",
+                            "${entries.size} archivos ($photos fotos, $videos videos).",
                     )
                 }
             } catch (e: Exception) {
                 _ui.update {
                     it.copy(loadingList = false, message = conexionError(e))
                 }
+            }
+        }
+    }
+
+    /** Muestra u oculta la respuesta cruda de la camara (diagnostico). */
+    fun toggleDiagnostic() {
+        _ui.update {
+            if (it.diagnostic == null) {
+                it.copy(
+                    diagnostic = client.lastListRawResponse.ifEmpty {
+                        "Aun no hay respuesta. Pulsa Conectar/Actualizar primero."
+                    }
+                )
+            } else {
+                it.copy(diagnostic = null)
             }
         }
     }
