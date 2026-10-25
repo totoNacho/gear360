@@ -281,17 +281,119 @@ class Gear360Client(
     var lastListRawResponse: String = ""
         private set
 
+    /**
+     * Lista las FOTOS de la camara (camera.listImages). En la Gear 360 este
+     * comando solo devuelve imagenes, no videos (los videos se buscan aparte
+     * con findVideos).
+     */
     fun listImages(pageSize: Int = 100, includeThumb: Boolean = true): List<MediaEntry> {
-        // Intento 1: camera.listFiles con fileType="all" (API v2). Es el
-        // comando correcto para traer FOTOS Y VIDEOS juntos, con miniaturas.
+        // Intento 1: listFiles con fileType="image" (API v2) si la soporta.
         try {
             val viaFiles = listViaListFiles(pageSize, includeThumb)
             if (viaFiles.isNotEmpty()) return viaFiles
         } catch (_: Exception) {
-            // Si la camara no soporta listFiles, caemos a listImages.
         }
-        // Intento 2 (fallback): camera.listImages (API v1).
+        // Intento 2 (el que funciona en tu firmware): listImages.
         return listViaListImages(pageSize, includeThumb)
+    }
+
+    /**
+     * Busca VIDEOS (.MP4) en la camara por numeracion. La Gear 360 no los
+     * lista con listImages, pero SI se pueden pedir por su ruta directa.
+     *
+     * Estrategia: a partir de las fotos ya listadas, deducimos la carpeta
+     * (ej. /mnt/mmc/DCIM/100PHOTO/) y el rango de numeros de archivo
+     * (los nombres son del tipo PREFIJO_NNNN.ext). Para cada numero del rango
+     * probamos si existe un .MP4 con los prefijos conocidos ("360_", "SAM_").
+     *
+     * @param photos lista de fotos ya obtenida (para deducir carpeta y rango).
+     * @param onProgress reporta (actual, total) del escaneo.
+     * @param shouldStop permite cancelar el escaneo.
+     */
+    fun findVideos(
+        photos: List<MediaEntry>,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+        shouldStop: () -> Boolean = { false },
+    ): List<MediaEntry> {
+        if (photos.isEmpty()) return emptyList()
+
+        // Carpeta base: tomamos la del primer archivo con uri valida.
+        val sampleUri = photos.firstOrNull { it.uri.contains("/") }?.uri ?: return emptyList()
+        val folder = sampleUri.substringBeforeLast('/')   // /mnt/mmc/DCIM/100PHOTO
+
+        // Numeros y prefijos presentes en las fotos.
+        val numbers = photos.mapNotNull { extractNumber(it.fileName) }
+        if (numbers.isEmpty()) return emptyList()
+        val min = numbers.min()
+        val max = numbers.max()
+
+        // Margen por si hay videos antes/despues del rango de fotos.
+        val from = (min - 5).coerceAtLeast(0)
+        val to = max + 5
+        val prefixes = listOf("360_", "SAM_")
+
+        val videos = ArrayList<MediaEntry>()
+        val totalChecks = (to - from + 1)
+        var done = 0
+
+        for (n in from..to) {
+            if (shouldStop()) break
+            val nnnn = n.toString().padStart(4, '0')
+            for (prefix in prefixes) {
+                if (shouldStop()) break
+                val fileName = "$prefix$nnnn.MP4"
+                val uri = "$folder/$fileName"
+                val size = headSize(uri)
+                if (size > 0) {
+                    videos.add(
+                        MediaEntry(
+                            name = fileName,
+                            uri = uri,
+                            size = size,
+                            mimeType = "video/mp4",
+                        )
+                    )
+                    break // encontrado con este numero, no probar el otro prefijo
+                }
+            }
+            done++
+            onProgress(done, totalChecks)
+        }
+        return videos
+    }
+
+    /** Extrae el numero NNNN de un nombre tipo "360_0270.MP4" o "SAM_0302.JPG". */
+    private fun extractNumber(fileName: String): Int? {
+        val m = Regex("""_(\d{3,5})\.""").find(fileName) ?: return null
+        return m.groupValues[1].toIntOrNull()
+    }
+
+    /**
+     * Devuelve el tamano en bytes de un archivo si existe en la camara, o 0 si
+     * no existe. Usa getImage pero cierra la conexion tras leer el
+     * Content-Length, sin descargar el contenido (rapido).
+     */
+    private fun headSize(fileUri: String): Long {
+        val body = JSONObject()
+            .put("name", "camera.getImage")
+            .put("parameters", JSONObject().put("fileUri", fileUri))
+            .toString()
+            .toRequestBody(jsonType)
+        val req = Request.Builder()
+            .url("$baseUrl/osc/commands/execute")
+            .post(body)
+            .build()
+        return try {
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return 0L
+                val len = resp.body?.contentLength() ?: -1L
+                // Si viene Content-Length valido lo usamos; si no, consideramos
+                // que existe pero de tamano desconocido.
+                if (len > 0) len else 1L
+            }
+        } catch (_: Exception) {
+            0L
+        }
     }
 
     /** Listado con camera.listFiles (API v2): fotos + videos + miniaturas. */

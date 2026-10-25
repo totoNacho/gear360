@@ -39,6 +39,12 @@ data class UiState(
     val recording: Boolean = false,         // hay una grabacion de video en curso
     val busyCapture: Boolean = false,       // ejecutando un comando de captura
 
+    // --- Separacion fotos / videos ---
+    val photos: List<MediaItem> = emptyList(),
+    val videos: List<MediaItem> = emptyList(),
+    val scanningVideos: Boolean = false,
+    val videoScanProgress: Int = 0,         // 0..100
+
     // --- Diagnostico ---
     val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
 
@@ -143,7 +149,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Lista las fotos/videos de la camara. */
+    /** Lista las FOTOS de la camara. Los videos se buscan aparte (scanVideos). */
     fun loadList() {
         _ui.update { it.copy(loadingList = true, message = null) }
         viewModelScope.launch {
@@ -156,16 +162,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         client.closeSession()
                     }
                 }
-                val photos = entries.count { !it.isVideo }
-                val videos = entries.count { it.isVideo }
+                // Separamos por si acaso viniera algun video en el listado.
+                val photoItems = entries.filter { !it.isVideo }.map { MediaItem(it) }
                 _ui.update {
                     it.copy(
                         loadingList = false,
-                        items = entries.map { e -> MediaItem(e) },
-                        message = if (entries.isEmpty())
-                            "No se encontraron fotos ni videos."
+                        photos = photoItems,
+                        items = photoItems,     // compatibilidad
+                        message = if (photoItems.isEmpty())
+                            "No se encontraron fotos."
                         else
-                            "${entries.size} archivos ($photos fotos, $videos videos).",
+                            "${photoItems.size} fotos. Pulsa 'Buscar videos' para los videos.",
                     )
                 }
             } catch (e: Exception) {
@@ -174,6 +181,61 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    @Volatile private var stopVideoScan = false
+
+    /**
+     * Busca los videos de la camara por numeracion (la Gear 360 no los lista
+     * con listImages). Usa las fotos ya cargadas para deducir carpeta y rango.
+     */
+    fun scanVideos() {
+        if (_ui.value.scanningVideos) return
+        val photos = _ui.value.photos.map { it.entry }
+        if (photos.isEmpty()) {
+            _ui.update { it.copy(message = "Primero carga las fotos (Conectar/Actualizar).") }
+            return
+        }
+        stopVideoScan = false
+        _ui.update { it.copy(scanningVideos = true, videoScanProgress = 0, message = "Buscando videos...") }
+
+        viewModelScope.launch {
+            try {
+                val found = withContext(Dispatchers.IO) {
+                    client.startSession()
+                    try {
+                        client.findVideos(
+                            photos = photos,
+                            onProgress = { done, total ->
+                                val pct = if (total > 0) done * 100 / total else 0
+                                _ui.update { it.copy(videoScanProgress = pct) }
+                            },
+                            shouldStop = { stopVideoScan },
+                        )
+                    } finally {
+                        client.closeSession()
+                    }
+                }
+                _ui.update {
+                    it.copy(
+                        scanningVideos = false,
+                        videos = found.map { v -> MediaItem(v) },
+                        message = if (found.isEmpty())
+                            "No se encontraron videos."
+                        else
+                            "${found.size} videos encontrados.",
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(scanningVideos = false, message = "Error al buscar videos: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun stopVideoScan() {
+        stopVideoScan = true
     }
 
     /** Muestra u oculta la respuesta cruda de la camara (diagnostico). */
@@ -206,11 +268,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Descarga TODOS los archivos pendientes, uno por uno. */
-    fun downloadAll() {
-        _ui.update { it.copy(downloadingAll = true, message = "Descargando todo...") }
+    /** Tipo de lista a descargar en bloque. */
+    enum class Which { PHOTOS, VIDEOS }
+
+    /** Descarga TODOS los archivos pendientes de la lista indicada. */
+    fun downloadAll(which: Which = Which.PHOTOS) {
+        _ui.update { it.copy(downloadingAll = true, message = "Descargando...") }
         viewModelScope.launch {
-            val pending = _ui.value.items.filter { it.state != DownloadState.DONE }
+            val source = if (which == Which.VIDEOS) _ui.value.videos else _ui.value.photos
+            val pending = source.filter { it.state != DownloadState.DONE }
             for (item in pending) {
                 updateItem(item.entry.uri) {
                     it.copy(state = DownloadState.DOWNLOADING, progress = 0, error = null)
@@ -250,7 +316,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun updateItem(uri: String, transform: (MediaItem) -> MediaItem) {
         _ui.update { state ->
-            state.copy(items = state.items.map { if (it.entry.uri == uri) transform(it) else it })
+            fun List<MediaItem>.apply() =
+                map { if (it.entry.uri == uri) transform(it) else it }
+            state.copy(
+                items = state.items.apply(),
+                photos = state.photos.apply(),
+                videos = state.videos.apply(),
+            )
         }
     }
 

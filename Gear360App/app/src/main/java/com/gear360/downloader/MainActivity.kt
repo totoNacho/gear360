@@ -261,52 +261,13 @@ fun CameraTab(vm: MainViewModel, ui: UiState) {
 
 @Composable
 fun GalleryTab(vm: MainViewModel, ui: UiState) {
+    // Sub-seccion: 0 = Imagenes, 1 = Videos
+    var sub by remember { mutableStateOf(0) }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(onClick = { vm.connect() }, enabled = !ui.connecting) {
-                Text(if (ui.connected) "Actualizar" else "Conectar camara")
-            }
-            if (ui.connected) {
-                Button(
-                    onClick = { vm.downloadAll() },
-                    enabled = ui.items.isNotEmpty() && !ui.downloadingAll
-                ) {
-                    Text("Descargar todo")
-                }
-            }
-        }
-
-        if (ui.connected) {
-            TextButton(onClick = { vm.toggleDiagnostic() }) {
-                Text(if (ui.diagnostic == null) "Ver diagnostico" else "Ocultar diagnostico")
-            }
-        }
-
-        // Panel de diagnostico: respuesta cruda de la camara. Sirve para
-        // depurar que campos devuelve tu firmware exactamente.
-        ui.diagnostic?.let { diag ->
-            Text(
-                text = diag,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 220.dp)
-                    .verticalScroll(rememberScrollState())
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        if (ui.connecting || ui.loadingList) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (ui.connecting) "Conectando..." else "Cargando lista...")
-            }
+        // Boton conectar/actualizar
+        Button(onClick = { vm.connect() }, enabled = !ui.connecting) {
+            Text(if (ui.connected) "Actualizar" else "Conectar camara")
         }
 
         ui.cameraInfo?.let { info ->
@@ -315,22 +276,83 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
                 style = MaterialTheme.typography.bodySmall
             )
         }
-
         ui.message?.let { msg ->
             Text(text = msg, style = MaterialTheme.typography.bodyMedium)
         }
 
         Spacer(Modifier.height(8.dp))
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            items(ui.items, key = { it.entry.uri }) { item ->
-                MediaRow(
-                    item = item,
-                    onDownload = { vm.download(item) }
-                )
+        // --- Sub-pestanas Imagenes / Videos ---
+        TabRow(selectedTabIndex = sub) {
+            Tab(selected = sub == 0, onClick = { sub = 0 },
+                text = { Text("Imagenes (${ui.photos.size})") })
+            Tab(selected = sub == 1, onClick = { sub = 1 },
+                text = { Text("Videos (${ui.videos.size})") })
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        if (ui.connecting || ui.loadingList) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (ui.connecting) "Conectando..." else "Cargando fotos...")
+            }
+        }
+
+        if (sub == 0) {
+            // ===== IMAGENES =====
+            if (ui.connected && ui.photos.isNotEmpty()) {
+                Button(
+                    onClick = { vm.downloadAll(MainViewModel.Which.PHOTOS) },
+                    enabled = !ui.downloadingAll,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Descargar todas las fotos") }
+                Spacer(Modifier.height(8.dp))
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(ui.photos, key = { it.entry.uri }) { item ->
+                    MediaRow(item = item, onDownload = { vm.download(item) })
+                }
+            }
+        } else {
+            // ===== VIDEOS =====
+            if (ui.connected) {
+                Button(
+                    onClick = { if (ui.scanningVideos) vm.stopVideoScan() else vm.scanVideos() },
+                    enabled = ui.photos.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (ui.scanningVideos) "Detener busqueda" else "Buscar videos")
+                }
+                if (ui.scanningVideos) {
+                    LinearProgressIndicator(
+                        progress = { ui.videoScanProgress / 100f },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                    )
+                    Text("Buscando... ${ui.videoScanProgress}%",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                if (ui.videos.isNotEmpty() && !ui.scanningVideos) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { vm.downloadAll(MainViewModel.Which.VIDEOS) },
+                        enabled = !ui.downloadingAll,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Descargar todos los videos") }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(ui.videos, key = { it.entry.uri }) { item ->
+                    MediaRow(item = item, onDownload = { vm.download(item) })
+                }
             }
         }
     }
