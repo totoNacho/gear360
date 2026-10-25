@@ -9,6 +9,7 @@
 .cxx
 local.properties
 /app/build
+.kotlin
 
 # Keystores de firma: NUNCA subir al repositorio (son certificados privados)
 *.jks

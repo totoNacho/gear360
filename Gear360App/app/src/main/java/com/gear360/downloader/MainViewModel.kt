@@ -53,6 +53,9 @@ data class UiState(
     // --- Stitching 360 ---
     val stitch360: Boolean = true,          // coser a 360 al descargar (on por defecto)
 
+    // --- Servidor de archivos del mod (puerto 8888) ---
+    val modActive: Boolean? = null,         // null = aun no se probo
+
     // --- Diagnostico ---
     val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
 
@@ -160,14 +163,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var stopScan = false
 
     /**
-     * Escanea TODA la camara (fotos + videos) por numeracion directa, porque
-     * listImages de esta Gear 360 solo reporta un subconjunto. Un solo escaneo
-     * llena ambas pestanas.
+     * Carga fotos y videos de la camara y llena ambas pestanas.
+     *
+     * 1) Servidor de archivos del mod (puerto 8888): listado completo en una
+     *    sola llamada, con miniaturas, y de paso ajusta el reloj de la camara.
+     * 2) Si no responde (no se hizo doble clic en Power), escanea por
+     *    numeracion con OSC, porque listImages solo reporta las fotos SAM_.
      */
     fun loadList() {
         stopScan = false
-        _ui.update { it.copy(loadingList = true, scanningVideos = true, videoScanProgress = 0, message = "Escaneando camara...") }
+        _ui.update {
+            it.copy(loadingList = true, scanningVideos = false, videoScanProgress = 0, message = "Buscando archivos...")
+        }
         viewModelScope.launch {
+            val viaMod = withContext(Dispatchers.IO) {
+                try { client.modListFiles() } catch (_: Exception) { null }
+            }
+            if (viaMod != null) {
+                val clockSynced = withContext(Dispatchers.IO) {
+                    try { client.modSyncClock(); true } catch (_: Exception) { false }
+                }
+                val photoItems = viaMod.photos.map { MediaItem(it) }
+                val videoItems = viaMod.videos.map { MediaItem(it) }
+                _ui.update {
+                    it.copy(
+                        loadingList = false,
+                        scanningVideos = false,
+                        modActive = true,
+                        photos = photoItems,
+                        videos = videoItems,
+                        items = photoItems,
+                        message = "${photoItems.size} fotos y ${videoItems.size} videos." +
+                            if (clockSynced) " Hora de la camara ajustada." else "",
+                    )
+                }
+                return@launch
+            }
+
+            _ui.update {
+                it.copy(
+                    modActive = false,
+                    scanningVideos = true,
+                    message = "Servidor de archivos no activo: escaneando por OSC (mas lento)...",
+                )
+            }
             try {
                 val result = withContext(Dispatchers.IO) {
                     client.startSession()
@@ -192,7 +231,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         photos = photoItems,
                         videos = videoItems,
                         items = photoItems,
-                        message = "${photoItems.size} fotos y ${videoItems.size} videos.",
+                        message = "${photoItems.size} fotos y ${videoItems.size} videos (por OSC). " +
+                            "Para ver miniaturas y listar al instante, haz doble clic en Power y pulsa Actualizar.",
                     )
                 }
             } catch (e: Exception) {
@@ -286,8 +326,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun doDownloadDirect(item: MediaItem) {
         val handle = saver.openOutput(item.entry.fileName, item.entry.isVideo)
         try {
-            client.downloadFile(
-                fileUri = item.entry.uri,
+            client.downloadEntry(
+                entry = item.entry,
                 onChunk = { buf, len -> handle.stream.write(buf, 0, len) },
                 onProgress = { soFar, total ->
                     if (total > 0) {
@@ -313,8 +353,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         try {
             // 1) Descargar a temporal (progreso 0..50%).
             tempIn.outputStream().use { out ->
-                client.downloadFile(
-                    fileUri = item.entry.uri,
+                client.downloadEntry(
+                    entry = item.entry,
                     onChunk = { buf, len -> out.write(buf, 0, len) },
                     onProgress = { soFar, total ->
                         if (total > 0) {
@@ -419,8 +459,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val bytes = withContext(Dispatchers.IO) {
                     val buffer = java.io.ByteArrayOutputStream()
-                    client.downloadFile(
-                        fileUri = item.entry.uri,
+                    client.downloadEntry(
+                        entry = item.entry,
                         onChunk = { buf, len -> buffer.write(buf, 0, len) },
                         onProgress = { soFar, total ->
                             if (total > 0) {

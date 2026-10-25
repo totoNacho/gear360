@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,9 +56,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 
 class MainActivity : ComponentActivity() {
 
@@ -316,6 +320,17 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
             Text(text = msg, style = MaterialTheme.typography.bodyMedium)
         }
 
+        // --- Estado del servidor de archivos del mod ---
+        ui.modActive?.let { active ->
+            Text(
+                text = if (active) "Servidor de archivos activo: listado completo y miniaturas"
+                else "Servidor de archivos no activo: haz doble clic en Power en la camara y pulsa Actualizar",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (active) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
         // --- Interruptor de stitching 360 ---
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -352,7 +367,13 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(if (ui.connecting) "Conectando..." else "Cargando fotos...")
+                Text(
+                    when {
+                        ui.connecting -> "Conectando..."
+                        ui.scanningVideos -> "Escaneando por OSC... ${ui.videoScanProgress}%"
+                        else -> "Cargando archivos..."
+                    }
+                )
             }
         }
 
@@ -381,12 +402,16 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
         } else {
             // ===== VIDEOS =====
             if (ui.connected) {
-                Button(
-                    onClick = { if (ui.scanningVideos) vm.stopVideoScan() else vm.scanVideos() },
-                    enabled = ui.photos.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (ui.scanningVideos) "Detener busqueda" else "Buscar videos")
+                // Con el servidor del mod los videos ya vienen en el listado;
+                // el boton de busqueda solo hace falta en el modo OSC.
+                if (ui.modActive != true) {
+                    Button(
+                        onClick = { if (ui.scanningVideos) vm.stopVideoScan() else vm.scanVideos() },
+                        enabled = ui.photos.isNotEmpty() || ui.scanningVideos,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (ui.scanningVideos) "Detener busqueda" else "Buscar videos")
+                    }
                 }
                 if (ui.scanningVideos) {
                     LinearProgressIndicator(
@@ -446,15 +471,48 @@ fun MediaRow(item: MediaItem, onDownload: () -> Unit, onPreview: () -> Unit = {}
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Vista previa: miniatura si la hay; si no, un icono segun tipo.
+        // Vista previa: miniatura del servidor del mod, miniatura OSC (base64)
+        // o un icono segun tipo. Tocar la miniatura de una foto la abre en grande.
+        val context = LocalContext.current
         val thumb = remember(item.entry.thumbnailBase64) {
             decodeThumb(item.entry.thumbnailBase64)
         }
+        val thumbUrl = item.entry.thumbnailUrl
+        val thumbRequest = remember(thumbUrl) {
+            thumbUrl?.let { url ->
+                // Clave con nombre y tamano: si la tarjeta se formatea y un
+                // nombre se repite, no se muestra la miniatura vieja de la cache.
+                val key = "${item.entry.name}_${item.entry.size}"
+                ImageRequest.Builder(context)
+                    .data(url)
+                    .memoryCacheKey(key)
+                    .diskCacheKey(key)
+                    .build()
+            }
+        }
         Box(
-            modifier = Modifier.width(56.dp).height(56.dp),
+            // 2:1, la proporcion de las miniaturas dual-fisheye (320x160).
+            modifier = Modifier
+                .width(96.dp)
+                .height(48.dp)
+                .clickable(
+                    enabled = !item.entry.isVideo,
+                    onClickLabel = "Ver en grande",
+                    onClick = onPreview
+                ),
             contentAlignment = Alignment.Center
         ) {
-            if (thumb != null) {
+            if (thumbRequest != null) {
+                // El icono queda debajo y se ve mientras carga o si falla.
+                Icon(imageVector = Icons.Filled.Photo, contentDescription = null)
+                AsyncImage(
+                    model = thumbRequest,
+                    contentDescription = item.entry.fileName,
+                    imageLoader = ThumbnailLoader.get(context),
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (thumb != null) {
                 Image(
                     bitmap = thumb,
                     contentDescription = item.entry.fileName,

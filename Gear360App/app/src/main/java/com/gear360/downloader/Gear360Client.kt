@@ -1,5 +1,6 @@
 package com.gear360.downloader
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,6 +24,10 @@ class Gear360Client(
     companion object {
         const val DEFAULT_IP = "192.168.43.1"
         const val DEFAULT_PORT = 80
+        /** Puerto del servidor de archivos del mod de la tarjeta SD. */
+        const val MOD_PORT = 8888
+        /** Carpeta donde la Gear 360 guarda fotos y videos. */
+        const val DEFAULT_FOLDER = "/mnt/mmc/DCIM/100PHOTO"
     }
 
     private val baseUrl = "http://$ip:$port"
@@ -631,6 +636,155 @@ class Gear360Client(
             return written
         }
     }
+
+    /** Descarga una entrada por la via que corresponda: servidor del mod u OSC. */
+    fun downloadEntry(
+        entry: MediaEntry,
+        onChunk: (ByteArray, Int) -> Unit,
+        onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): Long =
+        if (entry.source == MediaSource.MOD) {
+            modDownload(entry, onChunk, onProgress)
+        } else {
+            downloadFile(entry.uri, onChunk, onProgress)
+        }
+
+    // =========================================================================
+    //  SERVIDOR DE ARCHIVOS DEL MOD (ilker-aktuna, busybox httpd en el 8888)
+    // =========================================================================
+    //
+    // El mod de la tarjeta SD levanta su propio servidor HTTP cuando se hace
+    // doble clic en Power (luz verde-naranja-verde). Verificado en esta camara:
+    //   /cgi-bin/files             -> JSON con TODOS los archivos (fotos y videos)
+    //   /cgi-bin/files?thumbnail=N -> miniatura EXIF de 320x160 (solo JPG)
+    //   /cgi-bin/files?dl=N        -> archivo completo, sin Content-Length
+    //   /cgi-bin/setdate?millis=S  -> ajusta el reloj (S en SEGUNDOS epoch)
+    // Las respuestas usan saltos de linea "\n" y una cabecera mal escrita
+    // ("echo Content-Type: ..."). OkHttp lee las cabeceras de respuesta en modo
+    // tolerante, asi que las acepta.
+
+    private val modBaseUrl = "http://$ip:$MOD_PORT"
+
+    // Timeouts cortos: si el servidor no fue activado, el puerto rechaza la
+    // conexion y la app vuelve rapido al modo OSC.
+    private val modClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun modFilesUrl(param: String, value: String): String =
+        "$modBaseUrl/cgi-bin/files".toHttpUrl().newBuilder()
+            .addQueryParameter(param, value)
+            .build()
+            .toString()
+
+    /**
+     * Lista todas las fotos y videos con el servidor del mod, en una sola
+     * llamada. Lanza excepcion si el servidor no responde (no fue activado).
+     */
+    fun modListFiles(): ScanResult {
+        val req = Request.Builder().url("$modBaseUrl/cgi-bin/files").get().build()
+        val text = modClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw RuntimeException("Servidor de archivos: HTTP ${resp.code}")
+            resp.body?.string().orEmpty()
+        }
+        lastListRawResponse = truncateForDiag(text)
+
+        val start = text.indexOf('{')
+        if (start < 0) throw RuntimeException("Servidor de archivos: respuesta sin JSON")
+        // El CGI deja una coma antes de "]". El org.json de Android la
+        // convertiria en un elemento null, asi que la quitamos antes de parsear.
+        val json = JSONObject(text.substring(start).replace(Regex(""",\s*\]"""), "]"))
+        val results = json.optJSONObject("results")
+            ?: throw RuntimeException("Servidor de archivos: respuesta sin resultados")
+        val entries = results.optJSONArray("entries") ?: JSONArray()
+
+        val photos = ArrayList<MediaEntry>()
+        val videos = ArrayList<MediaEntry>()
+        for (i in 0 until entries.length()) {
+            val e = entries.optJSONObject(i) ?: continue
+            val name = e.optString("name").trim()
+            val lower = name.lowercase()
+            val isVideo = lower.endsWith(".mp4") || lower.endsWith(".mov")
+            val isPhoto = lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+            if (!isVideo && !isPhoto) continue
+            val entry = MediaEntry(
+                name = name,
+                // Ruta OSC equivalente: sirve de clave unica en las listas.
+                uri = "$DEFAULT_FOLDER/$name",
+                size = e.optLong("size", 0L),
+                mimeType = if (isVideo) "video/mp4" else "image/jpeg",
+                source = MediaSource.MOD,
+                thumbnailUrl = if (isPhoto) modFilesUrl("thumbnail", name) else null,
+            )
+            if (isVideo) videos.add(entry) else photos.add(entry)
+        }
+        // Si "ls" fallo dentro de la camara, la lista llega vacia aunque
+        // totalEntries no lo este: lo tratamos como error para usar OSC.
+        if (photos.isEmpty() && videos.isEmpty() && results.optInt("totalEntries", 0) > 0) {
+            throw RuntimeException("Servidor de archivos: listado vacio")
+        }
+        // El CGI ordena por fecha, pero el reloj de la camara vuelve a 2017;
+        // el numero de archivo si refleja el orden real de captura.
+        photos.sortByDescending { extractNumber(it.fileName) ?: 0 }
+        videos.sortByDescending { extractNumber(it.fileName) ?: 0 }
+        return ScanResult(photos, videos)
+    }
+
+    /**
+     * Ajusta el reloj de la camara con el CGI setdate del mod. El parametro se
+     * llama "millis", pero el script ejecuta `date -s @valor`, que espera
+     * SEGUNDOS (verificado). Devuelve la fecha que reporta la camara.
+     */
+    fun modSyncClock(epochSeconds: Long = System.currentTimeMillis() / 1000): String {
+        val url = "$modBaseUrl/cgi-bin/setdate".toHttpUrl().newBuilder()
+            .addQueryParameter("millis", epochSeconds.toString())
+            .build()
+        val req = Request.Builder().url(url).get().build()
+        modClient.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw RuntimeException("setdate: HTTP ${resp.code}")
+            val start = text.indexOf('{')
+            return if (start >= 0) JSONObject(text.substring(start)).optString("currentdate") else ""
+        }
+    }
+
+    /**
+     * Descarga un archivo con el CGI del mod (?dl=). El servidor no envia
+     * Content-Length: el progreso usa el tamano del listado y al final se
+     * comprueba que llegaron todos los bytes, porque en HTTP/1.0 sin longitud
+     * un corte de conexion parece un final normal.
+     */
+    private fun modDownload(
+        entry: MediaEntry,
+        onChunk: (ByteArray, Int) -> Unit,
+        onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
+    ): Long {
+        val req = Request.Builder().url(modFilesUrl("dl", entry.name)).get().build()
+        downloadClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw RuntimeException("Error al descargar (HTTP ${resp.code})")
+            }
+            val stream = resp.body?.byteStream() ?: throw RuntimeException("Respuesta vacia")
+            val total = entry.size
+            var written = 0L
+            val buffer = ByteArray(16384)
+            while (true) {
+                val read = stream.read(buffer)
+                if (read == -1) break
+                onChunk(buffer, read)
+                written += read
+                onProgress(written, total)
+            }
+            if (total > 0 && written != total) {
+                throw RuntimeException("Descarga incompleta: $written de $total bytes")
+            }
+            return written
+        }
+    }
 }
 
 data class CameraInfo(
@@ -640,6 +794,9 @@ data class CameraInfo(
     val serial: String,
 )
 
+/** De donde viene una entrada: API OSC (puerto 80) o servidor del mod (8888). */
+enum class MediaSource { OSC, MOD }
+
 data class MediaEntry(
     val name: String,
     val uri: String,
@@ -648,6 +805,9 @@ data class MediaEntry(
     val recordTimeSec: Int = 0,
     /** Miniatura en base64 (si la camara la envio con includeThumb). */
     val thumbnailBase64: String? = null,
+    val source: MediaSource = MediaSource.OSC,
+    /** URL de la miniatura del servidor del mod (solo fotos). */
+    val thumbnailUrl: String? = null,
 ) {
     /**
      * Detecta si es video mirando varias pistas, porque distintas firmwares
