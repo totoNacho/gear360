@@ -107,6 +107,31 @@ class Gear360Client(
         )
     }
 
+    /**
+     * Fija el formato del preview en vivo. getLivePreview devuelve HTTP 400 si
+     * la camara no tiene un previewFormat valido seteado. Probamos una
+     * resolucion comun y de bajo peso. Si la camara rechaza el valor, se
+     * ignora el error (puede que use uno por defecto).
+     */
+    private fun trySetPreviewFormat() {
+        val sid = sessionId ?: return
+        // Formato tipico soportado por la Gear 360 para el preview.
+        val previewFormat = JSONObject()
+            .put("width", 1024)
+            .put("height", 512)
+            .put("framerate", 30)
+        val options = JSONObject().put("previewFormat", previewFormat)
+        try {
+            execute(
+                "camera.setOptions",
+                JSONObject().put("sessionId", sid).put("options", options)
+            )
+        } catch (_: Exception) {
+            // Si no acepta este formato, seguimos: la camara puede tener uno
+            // por defecto que igual sirva para el stream.
+        }
+    }
+
     /** Dispara una foto (modo foto). Devuelve true si la camara acepto el comando. */
     fun takePicture(): Boolean {
         val sid = sessionId ?: return false
@@ -144,32 +169,58 @@ class Gear360Client(
         onFrame: (ByteArray) -> Unit,
         shouldStop: () -> Boolean,
     ) {
-        val body = JSONObject()
-            .put("name", "camera.getLivePreview")
-            .put("parameters", JSONObject().apply {
-                sessionId?.let { put("sessionId", it) }
-            })
-            .toString()
-            .toRequestBody(jsonType)
+        // Paso previo: fijar el formato del preview. Sin esto, la Gear 360
+        // suele responder HTTP 400 a getLivePreview.
+        trySetPreviewFormat()
 
         // El stream es largo: usamos un cliente con readTimeout amplio.
         val streamClient = http.newBuilder()
             .readTimeout(0, TimeUnit.SECONDS) // sin timeout de lectura
             .build()
 
-        val req = Request.Builder()
-            .url("$baseUrl/osc/commands/execute")
-            .post(body)
-            .build()
-
-        streamClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw RuntimeException("No se pudo iniciar la vista en vivo (HTTP ${resp.code})")
+        // Probamos dos variantes del cuerpo, porque segun la firmware la
+        // Gear 360 acepta una u otra:
+        //   1) sin sessionId (API level 2, sessionId esta deprecado)
+        //   2) con sessionId  (firmwares mas antiguas)
+        val bodies = buildList {
+            add(
+                JSONObject()
+                    .put("name", "camera.getLivePreview")
+                    .put("parameters", JSONObject())
+                    .toString()
+            )
+            sessionId?.let { sid ->
+                add(
+                    JSONObject()
+                        .put("name", "camera.getLivePreview")
+                        .put("parameters", JSONObject().put("sessionId", sid))
+                        .toString()
+                )
             }
-            val source = resp.body?.byteStream()
-                ?: throw RuntimeException("Vista en vivo sin cuerpo")
-            parseMjpeg(source, onFrame, shouldStop)
         }
+
+        var lastCode = -1
+        for (bodyStr in bodies) {
+            if (shouldStop()) return
+            val req = Request.Builder()
+                .url("$baseUrl/osc/commands/execute")
+                .post(bodyStr.toRequestBody(jsonType))
+                .build()
+
+            val resp = streamClient.newCall(req).execute()
+            if (resp.isSuccessful) {
+                resp.use { r ->
+                    val source = r.body?.byteStream()
+                        ?: throw RuntimeException("Vista en vivo sin cuerpo")
+                    parseMjpeg(source, onFrame, shouldStop)
+                }
+                return
+            } else {
+                lastCode = resp.code
+                resp.close()
+            }
+        }
+        throw RuntimeException("No se pudo iniciar la vista en vivo (HTTP $lastCode)")
     }
 
     /**

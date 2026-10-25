@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # necesario para publicar Releases con el APK
 
 jobs:
   build:
@@ -97,3 +97,22 @@ jobs:
           name: gear360-release-apk
           path: Gear360App/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # Publica el APK firmado como un Release de GitHub, con una pagina fija
+      # de descargas y un historial de versiones. Solo si hay keystore (APK
+      # firmado) y solo en push a main (no en cada ejecucion manual de prueba).
+      - name: Publish GitHub Release
+        if: steps.keystore.outputs.has_keystore == 'true' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Gear 360 Downloader v1.0.${{ github.run_number }}
+          body: |
+            APK firmado de Gear 360 Downloader.
+
+            Descarga **app-release.apk** mas abajo e instalalo en el telefono
+            (activa "instalar apps de origen desconocido" si te lo pide).
+
+            Build automatico #${{ github.run_number }}.
+          files: Gear360App/app/build/outputs/apk/release/*.apk
+          fail_on_unmatched_files: true
