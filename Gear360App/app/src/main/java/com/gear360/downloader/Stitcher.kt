@@ -43,18 +43,31 @@ object Stitcher {
         val outputFile = File(input.parentFile, "${base}_360.$ext")
         val out = outputFile.absolutePath
 
-        // Comando FFmpeg. Para video copiamos el audio tal cual (-c:a copy).
+        // Comando FFmpeg.
+        // - Video: recodificamos VIDEO (v360) y AUDIO a AAC. NO usar "-c:a copy"
+        //   porque corrompia el MP4 (moov atom not found). El moov queda al
+        //   final (sin +faststart) para que el inyector 360 pueda anadir el
+        //   atomo uuid sin desplazar offsets.
+        // - Foto: solo el filtro v360.
         val cmd = if (isVideo) {
-            "-y -i \"$inputPath\" -vf $V360 -c:a copy \"$out\""
+            "-y -i \"$inputPath\" -vf $V360 -c:v libx264 -preset veryfast -c:a aac \"$out\""
         } else {
             "-y -i \"$inputPath\" -vf $V360 \"$out\""
         }
 
         val session = FFmpegKit.execute(cmd)
-        return if (ReturnCode.isSuccess(session.returnCode)) {
-            Result.Ok(out)
-        } else {
-            Result.Error("FFmpeg fallo (code ${session.returnCode}). ${session.failStackTrace ?: ""}")
+        if (!ReturnCode.isSuccess(session.returnCode)) {
+            return Result.Error("FFmpeg fallo (code ${session.returnCode}). ${session.failStackTrace ?: ""}")
         }
+
+        // Para VIDEO: inyectar metadatos 360 para que YouTube/Facebook lo
+        // reconozcan como esfera navegable (coser no basta por si solo).
+        if (isVideo) {
+            Spherical360Injector.inject(outputFile)
+            // Si la inyeccion falla, el video igual quedo cosido (equirectangular);
+            // simplemente no llevara el metadato. No es motivo de error.
+        }
+
+        return Result.Ok(out)
     }
 }
