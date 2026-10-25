@@ -81,7 +81,9 @@ fun AppScreen(vm: MainViewModel) {
     var tab by remember { mutableStateOf(0) } // 0 = Camara, 1 = Galeria
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Gear 360") }) }
+        topBar = {
+            TopAppBar(title = { Text("Gear 360  ·  v${BuildConfig.VERSION_NAME}") })
+        }
     ) { padding ->
         Column(
             modifier = Modifier

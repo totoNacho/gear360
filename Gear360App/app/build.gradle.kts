@@ -37,8 +37,12 @@ android {
         applicationId = "com.gear360.downloader"
         minSdk = 26          // Android 8.0: cubre casi todos los telefonos actuales
         targetSdk = 35       // Android 15
-        versionCode = 1
-        versionName = "1.0"
+        // El numero de build lo pasa GitHub Actions por la variable de
+        // entorno BUILD_NUMBER (github.run_number). En local, si no existe,
+        // usamos 0. La version queda como "1.0.<build>".
+        val buildNumber = (System.getenv("BUILD_NUMBER") ?: "0").toInt()
+        versionCode = buildNumber + 1          // siempre creciente
+        versionName = "1.0.$buildNumber"
     }
 
     signingConfigs {
@@ -81,6 +85,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true   // para exponer VERSION_NAME a la app
     }
     // El plugin org.jetbrains.kotlin.plugin.compose gestiona la version del
     // compilador de Compose automaticamente (Kotlin 2.0+), ya no hace falta
@@ -88,6 +93,16 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    // Renombra el APK para incluir la version, p.ej. gear360-v1.0.11.apk,
+    // en vez de siempre "app-release.apk". Asi cada descarga es distinguible.
+    applicationVariants.all {
+        val variant = this
+        variant.outputs.all {
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            output.outputFileName = "gear360-v${variant.versionName}-${variant.buildType.name}.apk"
         }
     }
 }
