@@ -43,6 +43,12 @@ android {
         val buildNumber = (System.getenv("BUILD_NUMBER") ?: "0").toInt()
         versionCode = buildNumber + 1          // siempre creciente
         versionName = "1.0.$buildNumber"
+
+        // ffmpeg-kit solo publica arm64-v8a y x86_64. Limitamos a esos ABIs
+        // para que el build no busque librerias de 32 bits inexistentes.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     signingConfigs {
@@ -130,4 +136,9 @@ dependencies {
 
     // Corrutinas para trabajo en segundo plano
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // FFmpeg para el stitching 360 (dual-fisheye -> equirectangular) en el
+    // telefono. Fork mantenido de FFmpegKit (la original fue retirada en 2025).
+    // Variante LGPL "full" que incluye el filtro v360. Solo ABI arm64/x86_64.
+    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7")
 }

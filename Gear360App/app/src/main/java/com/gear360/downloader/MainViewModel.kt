@@ -50,6 +50,9 @@ data class UiState(
     val previewName: String? = null,        // nombre del archivo en vista previa
     val previewProgress: Int = 0,           // 0..100 descarga de la preview
 
+    // --- Stitching 360 ---
+    val stitch360: Boolean = true,          // coser a 360 al descargar (on por defecto)
+
     // --- Diagnostico ---
     val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
 
@@ -272,6 +275,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun doDownload(item: MediaItem) {
+        if (_ui.value.stitch360) {
+            doDownloadAndStitch(item)
+        } else {
+            doDownloadDirect(item)
+        }
+    }
+
+    /** Descarga directa a la galeria (sin coser), formato dual-fisheye original. */
+    private fun doDownloadDirect(item: MediaItem) {
         val handle = saver.openOutput(item.entry.fileName, item.entry.isVideo)
         try {
             client.downloadFile(
@@ -289,6 +301,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             handle.abortQuietly()
             throw e
         }
+    }
+
+    /**
+     * Descarga a un archivo temporal, lo cose a 360 con FFmpeg y guarda el
+     * resultado equirectangular en la galeria. El stitching de video tarda.
+     */
+    private fun doDownloadAndStitch(item: MediaItem) {
+        val cacheDir = java.io.File(appContext.cacheDir, "stitch").apply { mkdirs() }
+        val tempIn = java.io.File(cacheDir, item.entry.fileName)
+        try {
+            // 1) Descargar a temporal (progreso 0..50%).
+            tempIn.outputStream().use { out ->
+                client.downloadFile(
+                    fileUri = item.entry.uri,
+                    onChunk = { buf, len -> out.write(buf, 0, len) },
+                    onProgress = { soFar, total ->
+                        if (total > 0) {
+                            val pct = (soFar * 50 / total).toInt()
+                            updateItem(item.entry.uri) { it.copy(progress = pct) }
+                        }
+                    },
+                )
+            }
+
+            // 2) Coser a 360 (progreso 50..90%).
+            updateItem(item.entry.uri) { it.copy(progress = 55) }
+            val result = Stitcher.stitch(tempIn.absolutePath)
+
+            val finalFile: java.io.File = when (result) {
+                is Stitcher.Result.Ok -> java.io.File(result.outputPath)
+                is Stitcher.Result.Error -> {
+                    // Si el stitching falla, guardamos el original para no perder la descarga.
+                    _ui.update { it.copy(message = "Stitching fallo, guardo original: ${result.message.take(80)}") }
+                    tempIn
+                }
+            }
+
+            // 3) Copiar el resultado a la galeria (progreso 90..100%).
+            updateItem(item.entry.uri) { it.copy(progress = 92) }
+            val handle = saver.openOutput(finalFile.name, item.entry.isVideo)
+            try {
+                finalFile.inputStream().use { input -> input.copyTo(handle.stream) }
+                handle.complete()
+            } catch (e: Exception) {
+                handle.abortQuietly()
+                throw e
+            }
+
+            // 4) Limpiar temporales.
+            tempIn.delete()
+            if (finalFile != tempIn) finalFile.delete()
+        } catch (e: Exception) {
+            tempIn.delete()
+            throw e
+        }
+    }
+
+    /** Activa/desactiva el stitching 360 al descargar. */
+    fun setStitch360(enabled: Boolean) {
+        _ui.update { it.copy(stitch360 = enabled) }
     }
 
     private fun updateItem(uri: String, transform: (MediaItem) -> MediaItem) {

@@ -39,6 +39,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -313,6 +314,26 @@ fun GalleryTab(vm: MainViewModel, ui: UiState) {
         }
         ui.message?.let { msg ->
             Text(text = msg, style = MaterialTheme.typography.bodyMedium)
+        }
+
+        // --- Interruptor de stitching 360 ---
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Switch(
+                checked = ui.stitch360,
+                onCheckedChange = { vm.setStitch360(it) }
+            )
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text("Convertir a 360 al descargar", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (ui.stitch360) "Las descargas se cosen a 360 (videos tardan mas)"
+                    else "Se guarda el original (dos circulos)",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
 
         Spacer(Modifier.height(8.dp))
