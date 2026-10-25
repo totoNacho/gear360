@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -114,6 +115,48 @@ fun AppScreen(vm: MainViewModel) {
                 if (tab == 0) CameraTab(vm, ui) else GalleryTab(vm, ui)
             }
         }
+    }
+
+    // Dialogo de actualizacion disponible.
+    val update = ui.updateAvailable
+    if (update != null) {
+        AlertDialog(
+            onDismissRequest = { if (!ui.updateDownloading) vm.dismissUpdate() },
+            title = { Text("Version nueva disponible") },
+            text = {
+                Column {
+                    Text("Hay una version nueva: v${update.versionName}")
+                    Text(
+                        "Tienes instalada: v${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (ui.updateDownloading) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("Descargando... ${ui.updateProgress}%")
+                        LinearProgressIndicator(
+                            progress = { ui.updateProgress / 100f },
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { vm.downloadAndInstallUpdate() },
+                    enabled = !ui.updateDownloading
+                ) {
+                    Text(if (ui.updateDownloading) "Descargando..." else "Actualizar")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { vm.dismissUpdate() },
+                    enabled = !ui.updateDownloading
+                ) {
+                    Text("Mas tarde")
+                }
+            }
+        )
     }
 }
 

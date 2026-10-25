@@ -41,6 +41,11 @@ data class UiState(
 
     // --- Diagnostico ---
     val diagnostic: String? = null,         // respuesta cruda de la camara (debug)
+
+    // --- Auto-actualizacion ---
+    val updateAvailable: UpdateChecker.UpdateInfo? = null,
+    val updateDownloading: Boolean = false,
+    val updateProgress: Int = 0,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -50,6 +55,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
+
+    private val appContext = app.applicationContext
+
+    init {
+        // Al abrir la app, comprobamos en segundo plano si hay version nueva.
+        checkForUpdate()
+    }
+
+    /** Comprueba si hay una version mas nueva publicada en GitHub. */
+    fun checkForUpdate() {
+        viewModelScope.launch {
+            val info = withContext(Dispatchers.IO) {
+                try {
+                    UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
+                } catch (_: Exception) {
+                    null // sin internet o GitHub no responde: no molestamos
+                }
+            }
+            if (info != null) {
+                _ui.update { it.copy(updateAvailable = info) }
+            }
+        }
+    }
+
+    /** Descarga el APK de la version nueva y lanza el instalador. */
+    fun downloadAndInstallUpdate() {
+        val info = _ui.value.updateAvailable ?: return
+        _ui.update { it.copy(updateDownloading = true, updateProgress = 0) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    UpdateChecker.downloadAndInstall(
+                        context = appContext,
+                        apkUrl = info.apkUrl,
+                        onProgress = { pct ->
+                            _ui.update { it.copy(updateProgress = pct) }
+                        },
+                    )
+                }
+                _ui.update {
+                    it.copy(
+                        updateDownloading = false,
+                        message = "Abriendo instalador de la version ${info.versionName}...",
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(
+                        updateDownloading = false,
+                        message = "No se pudo actualizar: ${e.message ?: "error"}",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Descarta el aviso de actualizacion (el usuario eligio "mas tarde"). */
+    fun dismissUpdate() {
+        _ui.update { it.copy(updateAvailable = null) }
+    }
 
     /** Prueba la conexion con la camara (GET /osc/info). */
     fun connect() {
